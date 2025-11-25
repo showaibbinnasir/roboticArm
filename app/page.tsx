@@ -140,7 +140,7 @@ const checkReach = (x: number, y: number, z: number) => {
 };
 
 // ---- React component ----
-export default function Home(): JSX.Element {
+export default function Home() {
   // Refs with proper types to avoid runtime errors in SSR/production
   const containerRef = useRef<HTMLDivElement | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
