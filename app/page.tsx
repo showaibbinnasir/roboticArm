@@ -1,8 +1,9 @@
-'use client'
+"use client"
 
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 
+// ---- Constants & types ----
 const LINK_LENGTH = 49.5;
 const BASE_HEIGHT = 25;
 const FLOOR_Z = 0;
@@ -10,7 +11,11 @@ const CAMERA_DIST = 280;
 const DEFAULT_CAM_THETA = 270;
 const DEFAULT_CAM_PHI = 20;
 
-const JOINT_LIMITS = {
+type JointKey = 'q1' | 'q2' | 'q3' | 'q4' | 'gripper';
+
+type JointLimits = Record<JointKey, { min: number; max: number; label: string; default: number }>;
+
+const JOINT_LIMITS: JointLimits = {
   q1: { min: 0, max: 180, label: 'Yaw (Base)', default: 90 },
   q2: { min: 90, max: 180, label: 'Link 1', default: 90 },
   q3: { min: 0, max: 180, label: 'Link 2', default: 135 },
@@ -18,10 +23,11 @@ const JOINT_LIMITS = {
   gripper: { min: 80, max: 120, label: 'Gripper', default: 80 }
 };
 
-const deg2rad = (d) => d * Math.PI / 180;
-const rad2deg = (r) => r * 180 / Math.PI;
+const deg2rad = (d: number) => d * Math.PI / 180;
+const rad2deg = (r: number) => r * 180 / Math.PI;
 
-const calculateFK = (q1, q2, q3, q4) => {
+// FK/IK utilities (kept strongly-typed)
+const calculateFK = (q1: number, q2: number, q3: number, q4: number) => {
   const t1 = deg2rad(q1), t2 = deg2rad(q2 - 90), t3 = deg2rad(q3 - 90), t4 = deg2rad(q4 - 90);
   const p0 = { x: 0, y: 0, z: 0 };
   const p1 = { x: 0, y: 0, z: BASE_HEIGHT };
@@ -40,22 +46,20 @@ const calculateFK = (q1, q2, q3, q4) => {
   return { points: [p0, p1, p2, p3, p4], eeDir, yaw: t1 };
 };
 
-const solveIK = (tx, ty, tz, curr) => {
+const solveIK = (tx: number, ty: number, tz: number, curr: Record<JointKey, number>) => {
   let q = { ...curr };
 
-  // Step 1: Solve q1 (yaw) analytically from x, y
   const rhoT = Math.sqrt(tx * tx + ty * ty);
   if (rhoT > 0.1) {
     q.q1 = rad2deg(Math.atan2(ty, tx));
     if (q.q1 < 0) q.q1 += 360;
-    if (q.q1 > 180) q.q1 = 180 - (q.q1 - 180); // Mirror for reachability
+    if (q.q1 > 180) q.q1 = 180 - (q.q1 - 180);
   }
   q.q1 = Math.max(0, Math.min(180, q.q1));
 
   const zT = tz;
 
-  // Planar FK: compute (rho, z) from q2, q3, q4
-  const planarFK = (q2, q3, q4) => {
+  const planarFK = (q2: number, q3: number, q4: number) => {
     const t2 = deg2rad(q2 - 90), t3 = deg2rad(q3 - 90), t4 = deg2rad(q4 - 90);
     return {
       rho: LINK_LENGTH * (Math.cos(t2) + Math.cos(t2 + t3) + Math.cos(t2 + t3 + t4)),
@@ -63,19 +67,16 @@ const solveIK = (tx, ty, tz, curr) => {
     };
   };
 
-  // Planar Jacobian: derivatives of (rho, z) w.r.t (q2, q3, q4)
-  const planarJacobian = (q2, q3, q4) => {
+  const planarJacobian = (q2: number, q3: number, q4: number) => {
     const t2 = deg2rad(q2 - 90), t3 = deg2rad(q3 - 90), t4 = deg2rad(q4 - 90);
     const s2 = Math.sin(t2), c2 = Math.cos(t2);
     const s23 = Math.sin(t2 + t3), c23 = Math.cos(t2 + t3);
     const s234 = Math.sin(t2 + t3 + t4), c234 = Math.cos(t2 + t3 + t4);
 
-    // d(rho)/dq = -L * sin(angles)
     const dr2 = -LINK_LENGTH * (s2 + s23 + s234);
     const dr3 = -LINK_LENGTH * (s23 + s234);
     const dr4 = -LINK_LENGTH * s234;
 
-    // d(z)/dq = L * cos(angles)
     const dz2 = LINK_LENGTH * (c2 + c23 + c234);
     const dz3 = LINK_LENGTH * (c23 + c234);
     const dz4 = LINK_LENGTH * c234;
@@ -83,7 +84,6 @@ const solveIK = (tx, ty, tz, curr) => {
     return { dr: [dr2, dr3, dr4], dz: [dz2, dz3, dz4] };
   };
 
-  // Iterative IK using damped least squares
   const damping = 0.5;
   const stepScale = 0.8;
 
@@ -99,8 +99,6 @@ const solveIK = (tx, ty, tz, curr) => {
 
     const J = planarJacobian(q.q2, q.q3, q.q4);
 
-    // Damped pseudo-inverse: J^T * (J*J^T + λ²I)^-1 * error
-    // For 2x3 Jacobian, compute manually
     const JJT00 = J.dr[0] * J.dr[0] + J.dr[1] * J.dr[1] + J.dr[2] * J.dr[2] + damping * damping;
     const JJT01 = J.dr[0] * J.dz[0] + J.dr[1] * J.dz[1] + J.dr[2] * J.dz[2];
     const JJT11 = J.dz[0] * J.dz[0] + J.dz[1] * J.dz[1] + J.dz[2] * J.dz[2] + damping * damping;
@@ -113,7 +111,6 @@ const solveIK = (tx, ty, tz, curr) => {
     const tmp0 = inv00 * errRho + inv01 * errZ;
     const tmp1 = inv01 * errRho + inv11 * errZ;
 
-    // dq = J^T * tmp (convert to degrees)
     const dq2 = rad2deg((J.dr[0] * tmp0 + J.dz[0] * tmp1)) * stepScale;
     const dq3 = rad2deg((J.dr[1] * tmp0 + J.dz[1] * tmp1)) * stepScale;
     const dq4 = rad2deg((J.dr[2] * tmp0 + J.dz[2] * tmp1)) * stepScale;
@@ -123,49 +120,53 @@ const solveIK = (tx, ty, tz, curr) => {
     q.q4 = Math.max(0, Math.min(180, q.q4 + dq4));
   }
 
-  // Check final error
   const finalPos = planarFK(q.q2, q.q3, q.q4);
   const finalErr = Math.sqrt((rhoT - finalPos.rho) ** 2 + (zT - finalPos.z) ** 2);
   return { joints: q, success: finalErr < 5, error: finalErr };
 };
 
-const checkCollision = (pts, eeDir) => {
-  const cols = [];
+const checkCollision = (pts: Array<{ x: number; y: number; z: number }>, eeDir: { x: number; y: number; z: number }) => {
+  const cols: number[] = [];
   for (let i = 1; i < pts.length; i++) if (pts[i].z < -0.1) cols.push(i);
   if (pts[4].z + eeDir.z * 25 < -0.1) cols.push(5);
   return cols;
 };
 
-const checkReach = (x, y, z) => {
+const checkReach = (x: number, y: number, z: number) => {
   const d = Math.sqrt(x * x + y * y + (z - BASE_HEIGHT) * (z - BASE_HEIGHT));
   if (d > LINK_LENGTH * 3) return 'Target too far';
   if (z < 0) return 'Target below floor';
   return null;
 };
 
-export default function Home() {
+// ---- React component ----
+export default function Home(): JSX.Element {
+  // Refs with proper types to avoid runtime errors in SSR/production
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const robotRef = useRef<{
+    js: THREE.Mesh[];
+    ls: THREE.Mesh[];
+    g: { base: THREE.Mesh; f1: THREE.Mesh; f2: THREE.Mesh };
+  } | null>(null);
+  const targetRef = useRef<THREE.Mesh | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
 
-  const containerRef = useRef(null);
-  const cameraRef = useRef(null);
-  const robotRef = useRef({});
-  const targetRef = useRef(null);
-  const frameRef = useRef(null);
-  const rendererRef = useRef(null);
+  const [joints, setJoints] = useState<Record<JointKey, number>>({ q1: 90, q2: 90, q3: 135, q4: 135, gripper: 80 });
+  const [collision, setCollision] = useState<boolean>(false);
+  const [eePos, setEePos] = useState<{ x: number; y: number; z: number }>({ x: 0, y: 0, z: 0 });
+  const [camTheta, setCamTheta] = useState<number>(DEFAULT_CAM_THETA);
+  const [camPhi, setCamPhi] = useState<number>(DEFAULT_CAM_PHI);
+  const [mode, setMode] = useState<'fk' | 'ik'>('fk');
+  const [target, setTarget] = useState<{ x: number; y: number; z: number }>({ x: 50, y: 0, z: 100 });
+  const [ikMsg, setIkMsg] = useState<string>('');
+  const [esp32Ip, setEsp32Ip] = useState<string>('192.168.1.100');
+  const [status, setStatus] = useState<string>('disconnected');
+  const [lastCmd, setLastCmd] = useState<Record<string, number> | null>(null);
+  const [encrypt, setEncrypt] = useState<boolean>(true);
 
-  const [joints, setJoints] = useState({ q1: 90, q2: 90, q3: 135, q4: 135, gripper: 80 });
-  const [collision, setCollision] = useState(false);
-  const [eePos, setEePos] = useState({ x: 0, y: 0, z: 0 });
-  const [camTheta, setCamTheta] = useState(DEFAULT_CAM_THETA);
-  const [camPhi, setCamPhi] = useState(DEFAULT_CAM_PHI);
-  const [mode, setMode] = useState('fk');
-  const [target, setTarget] = useState({ x: 50, y: 0, z: 100 });
-  const [ikMsg, setIkMsg] = useState('');
-  const [esp32Ip, setEsp32Ip] = useState('192.168.1.100');
-  const [status, setStatus] = useState('disconnected');
-  const [lastCmd, setLastCmd] = useState(null);
-  const [encrypt, setEncrypt] = useState(true);
-
-  const updateCam = useCallback((th, ph) => {
+  const updateCam = useCallback((th: number, ph: number) => {
     if (!cameraRef.current) return;
     const t = deg2rad(th), p = deg2rad(ph);
     cameraRef.current.position.set(CAMERA_DIST * Math.cos(p) * Math.cos(t), CAMERA_DIST * Math.cos(p) * Math.sin(t), CAMERA_DIST * Math.sin(p) + 60);
@@ -175,6 +176,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!containerRef.current) return;
+    // size relies on client DOM
     const w = containerRef.current.clientWidth, h = 400;
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x1a1a2e);
@@ -229,18 +231,32 @@ export default function Home() {
     robotRef.current = { js, ls, g: { base: gBase, f1, f2 } };
     targetRef.current = tgt;
 
-    const animate = () => { frameRef.current = requestAnimationFrame(animate); renderer.render(scene, camera); };
+    const animate = () => {
+      frameRef.current = requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
     animate();
 
-    return () => { cancelAnimationFrame(frameRef.current); containerRef.current?.removeChild(renderer.domElement); renderer.dispose(); };
+    return () => {
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      if (containerRef.current && renderer.domElement.parentElement === containerRef.current) {
+        containerRef.current.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+      // small defensive cleanup
+      robotRef.current = null;
+      cameraRef.current = null;
+      rendererRef.current = null;
+    };
   }, [updateCam]);
 
   useEffect(() => { updateCam(camTheta, camPhi); }, [camTheta, camPhi, updateCam]);
 
+  // Update THREE objects when joints change
   useEffect(() => {
     const { points: pts, eeDir, yaw } = calculateFK(joints.q1, joints.q2, joints.q3, joints.q4);
     const r = robotRef.current;
-    if (!r.ls) return;
+    if (!r || !r.ls) return;
     const cols = checkCollision(pts, eeDir);
     setCollision(cols.length > 0);
     setEePos(pts[4]);
@@ -254,13 +270,22 @@ export default function Home() {
       r.ls[i].position.set((p1.x + p2.x) / 2, (p1.y + p2.y) / 2, (p1.z + p2.z) / 2);
       const dir = new THREE.Vector3(p2.x - p1.x, p2.y - p1.y, p2.z - p1.z).normalize();
       r.ls[i].setRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir));
-      r.ls[i].material.color.setHex(cols.includes(i + 2) ? 0xff0000 : [0x3498db, 0x2ecc71, 0xf39c12][i]);
+      // safe set color
+      try {
+        (r.ls[i].material as THREE.MeshStandardMaterial).color.setHex(cols.includes(i + 2) ? 0xff0000 : [0x3498db, 0x2ecc71, 0xf39c12][i]);
+      } catch (e) {
+        // ignore coloring errors in some WebGL contexts
+      }
     }
 
     const ee = pts[4], gCol = cols.includes(5), gC = gCol ? 0xff0000 : 0xe91e63;
-    r.g.base.material.color.setHex(gC);
-    r.g.f1.material.color.setHex(gC);
-    r.g.f2.material.color.setHex(gC);
+    try {
+      (r.g.base.material as THREE.MeshStandardMaterial).color.setHex(gC);
+      (r.g.f1.material as THREE.MeshStandardMaterial).color.setHex(gC);
+      (r.g.f2.material as THREE.MeshStandardMaterial).color.setHex(gC);
+    } catch (e) {
+      // ignore
+    }
     r.g.base.position.set(ee.x, ee.y, ee.z);
     const gDir = new THREE.Vector3(eeDir.x, eeDir.y, eeDir.z).normalize();
     const gQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), gDir);
@@ -279,14 +304,21 @@ export default function Home() {
     }
   }, [mode, target]);
 
-  const setJ = (k, v) => setJoints(p => ({ ...p, [k]: Math.max(JOINT_LIMITS[k].min, Math.min(JOINT_LIMITS[k].max, parseFloat(v))) }));
-  const setT = (k, v) => setTarget(p => ({ ...p, [k]: parseFloat(v) || 0 }));
+  // Helpers to set values safely
+  const setJ = (k: JointKey, v: number | string) => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    setJoints(p => ({ ...p, [k]: Math.max(JOINT_LIMITS[k].min, Math.min(JOINT_LIMITS[k].max, Number.isFinite(n) ? n : p[k])) }));
+  };
+  const setT = (k: keyof typeof target, v: number | string) => {
+    const n = typeof v === 'string' ? Number(v) : v;
+    setTarget(p => ({ ...p, [k]: Number.isFinite(n) ? n : p[k] }));
+  };
 
-  const calcIK = () => {
+  const calcIK = (): boolean => {
     const err = checkReach(target.x, target.y, target.z);
     if (err) { setIkMsg('❌ ' + err); return false; }
 
-    const res = solveIK(target.x, target.y, target.z, joints);
+    const res = solveIK(target.x, target.y, target.z, joints as Record<JointKey, number>);
 
     if (res.success) {
       setJoints(p => ({ ...p, q1: res.joints.q1, q2: res.joints.q2, q3: res.joints.q3, q4: res.joints.q4 }));
@@ -295,46 +327,40 @@ export default function Home() {
     } else {
       setJoints(p => ({ ...p, q1: res.joints.q1, q2: res.joints.q2, q3: res.joints.q3, q4: res.joints.q4 }));
       setIkMsg(`⚠️ IK partial (error: ${res.error.toFixed(1)}mm) - may not reach exactly`);
-      return res.error < 10; // Allow if close enough
+      return res.error < 10;
     }
   };
 
   const calcIKAndMove = async () => {
     const success = calcIK();
     if (success) {
-      // Small delay to let state update
+      // small delay to allow React to flush state (keeps UX similar to original)
       setTimeout(() => send(), 100);
     }
   };
 
-  // const send = async () => {
-  //   if (collision) { alert('Collision! Cannot send.'); return; }
-  //   const cmd = { q1: Math.round(joints.q1), q2: Math.round(joints.q2), q3: Math.round(joints.q3), q4: Math.round(joints.q4), gripper: Math.round(joints.gripper) };
-  //   await fetch('https://final-server-mocha.vercel.app/postValue', {
-  //       method: 'POST',
-  //       headers: { 'Content-Type': 'application/json' },
-  //       body: JSON.stringify({ cmd })
-  //     }).then(res => {
-  //       if (res.ok) {
-  //         setStatus('sent');
-  //         setLastCmd(cmd);
-  //       } else {
-  //         setStatus('error');
-  //         alert('Failed to send command to ESP32.');
-  //       }
-  //     });
-
-  // };
-
-  const send = () =>{
+  const send = () => {
     if (collision) { alert('Collision! Cannot send.'); return; }
     const cmd = { q1: Math.round(joints.q1), q2: Math.round(joints.q2), q3: Math.round(joints.q3), q4: Math.round(joints.q4), gripper: Math.round(joints.gripper) };
+    // Keep fetch but handle success/error and persist lastCmd/status for UI
     fetch('https://final-server-mocha.vercel.app/postValue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cmd })
-      }).then(res => res.json()).then(data => console.log(data));
-  }
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cmd })
+    }).then(async res => {
+      if (res.ok) {
+        setStatus('sent');
+        setLastCmd(cmd);
+      } else {
+        setStatus('error');
+        console.error('Failed to send command to server', await res.text());
+      }
+    }).catch(err => {
+      setStatus('error');
+      console.error(err);
+    });
+  };
+
   return (
     <div className="bg-gray-900 text-white p-2 text-xs">
       <h1 className="text-sm font-bold text-center mb-1">5-DOF Robot Arm Controller</h1>
@@ -351,12 +377,22 @@ export default function Home() {
       {mode === 'fk' && (
         <div className='flex justify-center'>
           <div className="bg-gray-800 w-[75%] p-2 rounded mb-2">
-            {Object.entries(JOINT_LIMITS).map(([k, l]) => (
-              <div key={k} className="mb-1">
-                <div className="flex justify-between"><span>{l.label}</span><span>{joints[k].toFixed(0)}°</span></div>
-                <input type="range" min={l.min} max={l.max} value={joints[k]} onChange={e => setJ(k, e.target.value)} className="w-full" />
-              </div>
-            ))}
+            {Object.entries(JOINT_LIMITS).map(([k, l]) => {
+              const key = k as JointKey;
+              return (
+                <div key={k} className="mb-1">
+                  <div className="flex justify-between"><span>{l.label}</span><span>{joints[key].toFixed(0)}°</span></div>
+                  <input
+                    type="range"
+                    min={l.min}
+                    max={l.max}
+                    value={joints[key]}
+                    onChange={e => setJ(key, Number(e.target.value))}
+                    className="w-full"
+                  />
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -367,7 +403,7 @@ export default function Home() {
             {['x', 'y', 'z'].map(k => (
               <div key={k}>
                 <label className="text-gray-400">{k.toUpperCase()} (mm)</label>
-                <input type="number" value={target[k]} onChange={e => setT(k, e.target.value)} className="w-full bg-gray-700 px-1 py-1 rounded" />
+                <input type="number" value={(target as any)[k]} onChange={e => setT(k as keyof typeof target, e.target.value)} className="w-full bg-gray-700 px-1 py-1 rounded" />
               </div>
             ))}
           </div>
@@ -376,7 +412,7 @@ export default function Home() {
           {ikMsg && <div className={`p-1 rounded text-center ${ikMsg.includes('solved') ? 'bg-green-800' : 'bg-red-800'}`}>{ikMsg}</div>}
           <div className="mt-2">
             <div className="flex justify-between"><span>Gripper</span><span>{joints.gripper}°</span></div>
-            <input type="range" min={80} max={120} value={joints.gripper} onChange={e => setJ('gripper', e.target.value)} className="w-full" />
+            <input type="range" min={80} max={120} value={joints.gripper} onChange={e => setJ('gripper', Number(e.target.value))} className="w-full" />
           </div>
         </div>
       )}
@@ -388,15 +424,6 @@ export default function Home() {
           <div><span>Elevation: {camPhi}°</span><input type="range" min={0} max={89} value={camPhi} onChange={e => setCamPhi(+e.target.value)} className="w-full" /></div>
         </div>
       </div>
-
-      {/* <div className="bg-gray-800 p-2 rounded mb-2">
-        <div className="font-bold text-gray-400 mb-1">ESP32 Connection</div>
-        <div className="flex gap-1 mb-1">
-          <input value={esp32Ip} onChange={e => setEsp32Ip(e.target.value)} className="flex-1 bg-gray-700 px-2 py-1 rounded" placeholder="IP" />
-          <span className={`px-2 py-1 rounded ${status === 'sent' ? 'bg-green-600' : 'bg-gray-600'}`}>{status}</span>
-        </div>
-        <label className="flex items-center gap-1"><input type="checkbox" checked={encrypt} onChange={e => setEncrypt(e.target.checked)} />🔒 HTTPS</label>
-      </div> */}
 
       <div className="bg-gray-800 p-2 rounded mb-2">
         <div className="font-bold text-gray-400">End Effector</div>
